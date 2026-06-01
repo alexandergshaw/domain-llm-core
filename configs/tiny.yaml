@@ -1,0 +1,9 @@
+vocab_size: 8000
+context_length: 512
+layers: 6
+hidden_size: 384
+attention_heads: 6
+dropout: 0.1
+batch_size: 16
+learning_rate: 0.0003
+epochs: 5
