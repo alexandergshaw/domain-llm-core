@@ -20,13 +20,16 @@ that can be trained on any plain-text corpus on a single GPU or CPU.
 ```
 domain-llm-core/
 ├── src/
-│   ├── config.py      – YAML → dataclass configuration loader
-│   ├── model.py       – Decoder-only transformer (attention, FFN, embeddings)
-│   ├── dataset.py     – Sliding-window next-token prediction dataset
-│   ├── train.py       – Full training loop with validation + checkpointing
-│   └── generate.py    – Autoregressive text generation from a checkpoint
+│   ├── config.py                    – YAML → dataclass configuration loader
+│   ├── model.py                     – Decoder-only transformer (attention, FFN, embeddings)
+│   ├── dataset.py                   – Sliding-window next-token prediction dataset
+│   ├── train.py                     – Full training loop with validation + checkpointing
+│   ├── generate.py                  – Autoregressive text generation from a checkpoint
+│   └── prepare_instruction_data.py  – Convert JSONL instruction examples → train.txt
 ├── configs/
 │   └── tiny.yaml      – Tiny model config (~15 M params)
+├── examples/
+│   └── instruction_examples.jsonl   – Sample instruction-tuning examples
 ├── data/              – Place train.txt here (gitignored, tracked via .gitkeep)
 ├── checkpoints/       – Saved checkpoints (gitignored, tracked via .gitkeep)
 ├── tests/             – Pytest unit tests
@@ -159,6 +162,126 @@ epochs: 5
 ```
 
 Approximate parameter count for the tiny config: **~15 M parameters**.
+
+---
+
+## Instruction-tuning workflow
+
+You can fine-tune (or train from scratch) on instruction-following data using
+`src/prepare_instruction_data.py`.
+
+### JSONL format
+
+Each line of the examples file must be a JSON object with these fields:
+
+| Field | Required non-empty | Description |
+|---|---|---|
+| `instruction` | ✓ | The task description |
+| `input` | ✗ (may be empty) | Optional additional context |
+| `output` | ✓ | The expected model response |
+| `source_file` | ✓ | Provenance / origin filename |
+| `category` | ✓ | Task category (used for summary counts) |
+
+Example record:
+
+```json
+{"instruction": "Summarize this.", "input": "Some text here.", "output": "A concise summary.", "source_file": "my_data.txt", "category": "summarization"}
+```
+
+Records with missing or wrong-typed required fields are **skipped with a warning**.
+An empty `input` field is **allowed** — many tasks need no additional context.
+
+### Formatted output
+
+Each valid record is written to the output file in this format:
+
+```
+<bos>
+### Instruction:
+<instruction text>
+
+### Input:
+<input text>
+
+### Response:
+<output text>
+<eos>
+```
+
+Records are separated by a blank line.
+
+### Prepare training data
+
+```bash
+# Use the bundled sample examples
+python src/prepare_instruction_data.py \
+    --examples-file examples/instruction_examples.jsonl \
+    --output-file data/train.txt
+
+# Or point at your own JSONL file
+python src/prepare_instruction_data.py \
+    --examples-file /path/to/my_examples.jsonl \
+    --output-file data/train.txt
+```
+
+The script prints a per-category summary:
+
+```
+Processed 10 rows from 'examples/instruction_examples.jsonl'
+  Valid   : 10
+  Skipped :  0
+
+Examples by category:
+  classification    1
+  code_generation   2
+  question_answering 3
+  reasoning         1
+  summarization     1
+  text_editing      1
+  translation       1
+
+Output written to 'data/train.txt' (10 examples).
+```
+
+### Train a tokenizer, then train the model
+
+```bash
+# 1. Prepare the text
+python src/prepare_instruction_data.py \
+    --examples-file examples/instruction_examples.jsonl \
+    --output-file data/train.txt
+
+# 2. Train a BPE tokenizer on the prepared text
+python - <<'EOF'
+from tokenizers import Tokenizer
+from tokenizers.models import BPE
+from tokenizers.trainers import BpeTrainer
+from tokenizers.pre_tokenizers import Whitespace
+
+tok = Tokenizer(BPE(unk_token="[UNK]"))
+tok.pre_tokenizer = Whitespace()
+trainer = BpeTrainer(vocab_size=8000, special_tokens=["[UNK]", "<bos>", "<eos>"])
+tok.train(files=["data/train.txt"], trainer=trainer)
+tok.save("tokenizer.json")
+EOF
+
+# 3. Train the model
+python src/train.py \
+    --config configs/tiny.yaml \
+    --tokenizer-path tokenizer.json \
+    --train-file data/train.txt \
+    --checkpoint-dir checkpoints/
+
+# 4. Generate a response
+python src/generate.py \
+    --checkpoint checkpoints/best.pt \
+    --tokenizer-path tokenizer.json \
+    --config configs/tiny.yaml \
+    --prompt $'<bos>\n### Instruction:\nExplain what dropout is.\n\n### Input:\n\n### Response:\n' \
+    --max-new-tokens 150 \
+    --temperature 0.7 \
+    --top-k 40
+```
 
 ---
 
